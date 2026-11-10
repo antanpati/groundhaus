@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      APP_MODE: online
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in .env}
+    volumes:
+      - groundhaus_data:/app/app_data
+    expose:
+      - "8501"
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  groundhaus_data:
+  caddy_data:
+  caddy_config:
