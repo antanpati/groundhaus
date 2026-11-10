@@ -279,7 +279,10 @@ a,b=st.columns(2)
 with a:
     st.download_button('Download Excel Villa',xlsx,file_name=f'{villa.replace("/","-")}_{month}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 with b:
-    st.download_button('Download PDF Villa',pdf,file_name=f'{villa.replace("/","-")}_{month}.pdf',mime='application/pdf')
+    if pdf is not None:
+        st.download_button('Download PDF Villa',pdf,file_name=f'{villa.replace("/","-")}_{month}.pdf',mime='application/pdf')
+    else:
+        st.info('Download PDF belum tersedia. Excel tetap bisa diunduh; periksa pesan error PDF di atas.')
 with st.expander('Export semua villa dalam satu ZIP (bulan sama)'):
     if st.button('Generate ZIP seluruh villa'):
         grouped={}
@@ -320,7 +323,3 @@ if history:
     })
     st.dataframe(hist_style,use_container_width=True,hide_index=True)
 st.caption('V2.3 lokal. Backup file app_data/groundhaus.sqlite3. Hindari pengiriman database ini ke pihak lain karena berisi data tamu.')
-
-Python 3.14.10 (v3.14.10:b703b2c5e70, Oct 25 2026, 14:17:53) [Clang 21.0.0 (clang-2100.1.1.101)] on darwin
-Enter "help" below or click "Help" above for more information.
-
