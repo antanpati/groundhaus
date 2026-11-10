@@ -320,3 +320,7 @@ if history:
     })
     st.dataframe(hist_style,use_container_width=True,hide_index=True)
 st.caption('V2.3 lokal. Backup file app_data/groundhaus.sqlite3. Hindari pengiriman database ini ke pihak lain karena berisi data tamu.')
+
+Python 3.14.10 (v3.14.10:b703b2c5e70, Oct 25 2026, 14:17:53) [Clang 21.0.0 (clang-2100.1.1.101)] on darwin
+Enter "help" below or click "Help" above for more information.
+
