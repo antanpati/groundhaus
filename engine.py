@@ -73,6 +73,11 @@ def reconciliation(df,existing_links):
     if df.empty: return [],pd.DataFrame(columns=['Confirmation code','Listing','Currency','Amount','Type'])
     res=df[df['Type'].eq('Reservation')].copy()
     payouts=df[df['Type'].eq('Payout')].copy()
+    # Re-imports of the same payout should not create multiple selectable rows.
+    # Keep distinct changes/amounts so an operator can review them.
+    identity_cols=[c for c in ('Reference code','Date','Currency','Paid out','Details') if c in payouts.columns]
+    if identity_cols:
+        payouts=payouts.drop_duplicates(subset=identity_cols,keep='last')
     manual={}
     for reference,code in existing_links:manual.setdefault(reference,[]).append(code)
     rows=[]; used=set()

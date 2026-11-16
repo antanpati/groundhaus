@@ -312,20 +312,28 @@ for row in rows:
         related.append(row)
     elif row['currency']==settings['currency'] and not row['codes']:
         related.append(row)
+from collections import Counter
+payout_reference_counts = Counter(p['reference'] for p in rows)
 with st.expander(f'Payout matching ({len(related)} candidate/matched)',expanded=False):
-    for p in related:
+    for payout_index, p in enumerate(related):
+        # A reference can occur in multiple exports or genuinely distinct payout rows.
+        # Streamlit widget keys must therefore include the row position.
+        widget_id = f'{payout_index}_{p["reference"]}'
+        ambiguous_reference = payout_reference_counts[p['reference']] > 1
         payout_date = p['date'].date() if pd.notna(p['date']) else ''
         st.markdown(f"**{p['reference']}** · {money(p['paid_out'], p['currency'])} · {payout_date}")
         selected_current=p['codes']
+        if ambiguous_reference:
+            st.warning('Reference code ini digunakan oleh beberapa payout berbeda. Matching dinonaktifkan sampai transaksi direview; aplikasi lama menyimpan link berdasarkan reference code saja.')
         if p['suggestion']:
             st.caption(f"Suggested: {p['suggestion']} (not applied until saved)")
         options=sorted(set(codes_for_villa+selected_current))
-        selected=st.multiselect('Link confirmation codes',options,default=selected_current,key='match_'+p['reference'])
+        selected=st.multiselect('Link confirmation codes',options,default=selected_current,key='match_'+widget_id, disabled=ambiguous_reference)
         total=sum(code_amount.get(c,0) for c in selected)
         valid=(not selected or (abs(total-p['paid_out'])<=1 and all(code_curr.get(c)==p['currency'] for c in selected)))
         if selected:
             st.caption(f'Selected reservation sum: {money(total,p["currency"])} | '+('Matched' if valid else 'DOES NOT MATCH payout total/currency'))
-        if st.button('Save matching',key='save_'+p['reference']):
+        if st.button('Save matching', key='save_'+widget_id, disabled=ambiguous_reference):
             assigned={c for ref,c in links if ref!=p['reference']}
             if not valid:
                 st.error('Jumlah reservation Amount dan payout harus sama (+/- 1) dan currency harus sama.')
