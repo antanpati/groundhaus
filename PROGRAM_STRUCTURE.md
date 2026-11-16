@@ -1,4 +1,8 @@
-# GROUNDHAUS REPORTING V2.3 — PETA PROGRAM
+## V2.7 — Stay-Based Revenue Allocation
+
+See `REVENUE_ALLOCATION.md`. November/December stays now split Amount, Gross and OTA Fee by occupied nights. Historic monthly report figures will change; backup and verify before production deployment.
+
+# GROUNDHAUS REPORTING V2.6 — PETA PROGRAM
 
 ## Alur sistem
 1. **Upload CSV** → `app.py` (Data Master), `reporting.py::parse_csv`, `store.py::import_transactions` → SQLite.
@@ -48,3 +52,16 @@
 - `owner_exports.py` fungsi `_pdf_text()`: Arabic shaping + arah baca kanan-ke-kiri untuk PDF.
 - `owner_exports.py` fungsi `make_pdf()`: memakai font Unicode dan nama tamu RTL.
 - `requirements.txt`: dependensi `arabic-reshaper`, `python-bidi`.
+
+
+### V2.6 Reservation Lifecycle
+- `app.py` bagian Data Master: pemisahan Paid dan Upcoming CSV.
+- `reservation_master.py::import_paid/import_upcoming`: import non-destructive dan historis snapshot.
+- `reservation_master.py::get_state`: satu versi efektif per confirmation code, memisahkan Paid dan Upcoming, menampilkan konflik.
+- `reservation_master.py::choose`: keputusan versi dari review antrean.
+- `reservation_master.py::save_override/remove_override`: edit/cancel dengan audit history.
+- `reservation_master.py::set_adjustment`: konfirmasi adjustment negatif/positif agar tidak dobel.
+- `reservation_master.py::unresolved_for_villa`: blokir approval jika ada konflik/adjustment belum diperiksa.
+- `owner_exports.py`: sheet `RESERVATION STATUS`, status cancel/modified pada output.
+- `store.py::reset_all_data`: juga membersihkan tabel `v26_*` bila admin memilih reset.
+- `DEPLOY_UPGRADE.md`: cara backup dan update VPS tanpa menghapus Docker volume.

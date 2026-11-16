@@ -1,63 +1,62 @@
-# Groundhaus Airbnb Reporting — V2.2
+## V2.7 — Stay-Based Revenue Allocation
 
-Streamlit web application: upload Airbnb transaction CSV, map listing -> property -> room, individual villa dashboard, owner reports Excel/PDF, payout reconciliation, local SQLite history and admin-only reset.
+See `REVENUE_ALLOCATION.md`. November/December stays now split Amount, Gross and OTA Fee by occupied nights. Historic monthly report figures will change; backup and verify before production deployment.
 
-## Important security warning
-The app includes real guest and revenue data: **do not publish without login and HTTPS**. Online mode refuses to show app data without an `APP_PASSWORD` of at least 16 characters. **Do not commit** `.env`, SQLite, financial CSVs, export files or other real guest data. The `.gitignore` and `.dockerignore` are preconfigured.
+# Groundhaus Airbnb Reporting V2.7
 
-## Local Mac
-Use Python 3.11-3.14; `bash run_mac.command`, then http://127.0.0.1:8501. The local launcher sets APP_MODE=local and binds to loopback only. Never use APP_MODE=local when serving the internet.
+Streamlit application for Groundhaus villa reporting. Python 3.12 recommended.
 
-## Deploy to Ubuntu VPS via Docker Compose + Caddy TLS
-Prerequisites: SSH, Git, Docker Engine and Docker Compose plugin on VPS; domain whose A record points to VPS; 80/443 TCP open; 443/udp optional. **Inspect old services before stopping them**. Avoid conflicts on 80/443: if your VPS already uses Nginx/Traefik/Caddy, integrate there instead of starting a second proxy.
+## Changes in V2.7
 
-1. Push this folder to a **private GitHub repository** after reviewing tracked files. Do not push databases or reports.
-2. SSH to VPS, then `git clone https://github.com/YOUR_ORG/YOUR_PRIVATE_REPO.git /opt/groundhaus-reporting` (use SSH key or GitHub auth as required). `cd /opt/groundhaus-reporting`.
-3. `cp .env.example .env` then edit `DOMAIN` and long random `APP_PASSWORD`, e.g. `nano .env`; `chmod 600 .env`.
-4. Make sure DNS and ports point to VPS and 80/443 are free. `docker compose up -d --build`.
-5. `docker compose ps`, `docker compose logs --tail=80 app caddy` and open `https://YOUR_DOMAIN`.
+- Import **Paid** and **Upcoming** separately (Airbnb CSV exports).
+- Deduplicate reservations by **Confirmation Code**; identical repeated uploads are ignored.
+- Keep a **version history**, report differences, and allow explicit selection of the accepted Paid / Upcoming version.
+- **Manual Cancel / Shorten / Modify** with final dates, revenue, OTA fee, gross and a required reason. Past source rows are preserved; actions have an audit trail.
+- **Adjustment review**: when Airbnb includes an Adjustment transaction, choose whether it is already included, must be applied, or excluded. Never apply it automatically, to avoid a second deduction.
+- Separate **Actual Paid** versus **Upcoming Expected** in the villa dashboard.
+- Export Excel and PDF for actual Paid reservations. Excel includes a new `RESERVATION STATUS` worksheet.
+- Keep previous property / room mapping, additional expenses, management fees, and report approval workflow.
 
-To update: `git pull --ff-only && docker compose up -d --build`. Named volume `groundhaus_data` remains persistent after container recreation. **Do not run** `docker compose down -v` unless intentionally destroying database volumes.
+**Important reporting definitions:** Paid is a source category, not proof that cash has entered the bank; Upcoming Amount is a forecast, not realized revenue. No automatic cancellation is inferred from a missing Upcoming booking.
 
-To back up SQLite database: use in-app download under sidebar > Reset seluruh data (backup first), save offline. When restoring server-side volumes, stop application, restore from verified backup using a container with correct volume ownership.
+## Data migration
 
-## Reset
-Sidebar > **Reset seluruh data** > Download backup > type `HAPUS SEMUA DATA`, check acknowledgement, and enter admin password on online mode. Deletes transaction history, villa/room mappings, configuration, expenses, links, and approvals. Clears app session state. The schema stays available. Deletion is transactional and cannot be undone without restoring backup.
+Old database remains untouched in structure and original transactions. V2.7 creates tables with the `v26_` prefix, which are populated from the existing `transactions` table when the app starts. This is a nondestructive migration.
 
-## Github commands (from this project folder on your Mac)
-```
-git init
-git add .
-git status
-git commit -m "Groundhaus Reporting V2.2"
-git branch -M main
-git remote add origin git@github.com:YOUR_ACCOUNT/YOUR_PRIVATE_REPO.git
-git push -u origin main
-```
-Review `git status` before committing. Do not share any CSV or DB in repository.
+An old report approval is **invalidated** by the new reservation snapshot state and must be reviewed again. Always make a database backup before updating server code.
 
-## Existing VPS service inventory before decommission
-```
-docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
-docker compose ls
-sudo ss -ltnp | grep -E ':(80|443|8501|3000)\\b' || true
-systemctl --type=service --state=running --no-pager
-```
-Once the specific old app and data paths are identified, back it up before stopping just its containers/services. **Never use** `docker system prune --volumes`, `rm -rf /var/www`, or `docker compose down -v` as generic cleanup.
+## Usage
 
-## Accounting notes
-Reservation revenue is assigned by check-in month, occupancy by room nights in month, payout reconciliation is not a bank receipt. Manually review and approve owner reports prior to sharing.
+1. Upload **Paid CSV** in the sidebar using `Import CSV ke histori`.
+2. Upload **Upcoming CSV** in the separate sidebar upload.
+3. Set property/room mapping if a new listing appears.
+4. Choose a property and month.
+5. Check `Reservation Lifecycle` and resolve flagged versions / adjustments.
+6. For a cancellation or shortened stay, select the Confirmation Code and set dates and final amounts; enter a reason.
+7. Verify actual, forecast, occupancy, payout matching; approve and export the owner report.
 
+### Manual cancellation with penalty
 
-## Update V2.3
-- Mapping listing → property → room/unit; satu property hanya tampil sekali dalam pilihan villa.
-- Setelah klik Simpan mapping, dropdown menggunakan data mapping yang sudah tersimpan.
-- Tabel ringkasan property/rooms di bawah form mapping agar mudah dicek.
-- File `PROGRAM_STRUCTURE.md` menjelaskan lokasi setiap fitur untuk revisi selanjutnya.
+Use status `Cancelled`, check-in date equal to check-out date, 0 occupied nights, and set **Amount final** to the penalty that belongs in the report (or 0 for a full refund). Do not assume a percentage refund based on room nights. For an early checkout, use `Modified`, not `Cancelled`, to keep actual occupied nights.
 
+### What this version does NOT do
 
-## V2.4: Nama tamu Arab di PDF
+- It does not automatically know that a booking was cancelled because it disappeared from an Upcoming export.
+- It does not merge third-party reservation feeds or provide real-time Airbnb API sync.
+- It does not automatically match a payout to bank receipt.
+- It does not decide whether an Adjustment has already affected the final Amount. That remains a manual review.
+- New V2.7 UI has been validated by source compilation and automated engine tests, but not end-to-end against the live VPS and Streamlit browser.
 
-PDF kini memakai font Unicode lokal, dengan `arabic-reshaper` + `python-bidi` untuk tulisan RTL. `run_mac.command` akan memasang dependensinya saat dijalankan dengan koneksi internet. Data asli CSV/Excel tidak diubah.
+## Files
 
-Font TTF yang didukung otomatis dicari, termasuk macOS `Arial Unicode.ttf` dan `DejaVuSans.ttf` jika terpasang. Bila font yang mendukung Arab tidak ditemukan, aplikasi menampilkan error yang jelas daripada mencetak kotak. Install font DejaVu Sans TTF pada Mac jika perlu, atau jalankan dengan `GROUNDHAUS_UNICODE_FONT=/path/to/font.ttf bash run_mac.command`.
+- `app.py` — Streamlit UI, imports, dashboard, review, approval, export
+- `reservation_master.py` — V2.7 deduplication, versioning, audit, changes, import
+- `store.py` — persistent SQLite schema and legacy storage
+- `engine.py` — monthly occupancy, revenue, payout reconciliation
+- `reporting.py` — Airbnb CSV normalization and IDR formatting
+- `owner_exports.py` — Excel/PDF reporting with status worksheet
+- `Dockerfile` — Python 3.12, packages and Unicode font
+- `DEPLOY_UPGRADE.md` — GitHub + VPS safe update instructions
+- `tests/test_master.py` — synthetic unit tests, no guest data
+
+Run locally: `bash run_mac.command` (or `streamlit run app.py`).

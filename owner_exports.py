@@ -1,6 +1,7 @@
 """Owner-facing Excel and PDF, resembling the sample monthly recap layout."""
 import io,zipfile,re,os,glob,unicodedata
 from datetime import date
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill,Font
 from openpyxl.utils import get_column_letter
@@ -77,20 +78,22 @@ def _pdf_text(value):
         text = get_display(arabic_reshaper.reshape(text), base_dir='R')
     return escape(text)
 
-COLUMNS=['No','Guest Name','Check In','Check Out','Nights','Room / Listing','Publish Rate*','OTA Commission','Payout (Amount)','Remarks']
+COLUMNS=['No','Guest Name','Check In','Check Out','Month Nights','Room / Listing','Gross (Monthly)*','OTA Fee (Monthly)','Stay Revenue (Monthly)','Remarks']
 
 def _room_listing_label(r):
     room = str(r.get('Room') or '').strip()
     listing = str(r.get('Listing') or '').strip()
     if room and room != listing:
         return f'{room} | {listing}'
-    return room or listing
+    val=room or listing
+    status=r.get('_status','')
+    return val + (f' [{status}]' if status in ('Cancelled','Modified') else '')
 
 def _rows(res):
     out=[]
     for i,(_,r) in enumerate(res.sort_values('Start date').iterrows(),1):
         dt=lambda v:v.date() if hasattr(v,'date') and not str(v)=='NaT' else None
-        out.append([i,excel_safe(r['Guest']),dt(r['Start date']),dt(r['End date']),float(r['Nights']),excel_safe(_room_listing_label(r)),float(r['Gross earnings']) if str(r['Gross earnings'])!='nan' else 0,float(r['Service fee']) if str(r['Service fee'])!='nan' else 0,float(r['Amount']) if str(r['Amount'])!='nan' else 0,excel_safe(r['Confirmation code'])])
+        out.append([i,excel_safe(r['Guest']),dt(r['Start date']),dt(r['End date']),float(r['Nights']),excel_safe(_room_listing_label(r)),float(r['Gross earnings']) if str(r['Gross earnings'])!='nan' else 0,float(r['Service fee']) if str(r['Service fee'])!='nan' else 0,float(r['Amount']) if str(r['Amount'])!='nan' else 0,excel_safe(str(r['Confirmation code']) + (' / '+str(r.get('_status')) if r.get('_status') in ('Cancelled','Modified') else ''))])
     return out
 
 def make_excel(villa,month,res,s,occ,expenses,payouts,approved):
@@ -104,11 +107,11 @@ def make_excel(villa,month,res,s,occ,expenses,payouts,approved):
     for j in (7,8,9):ws.cell(total,j,f'=SUM({get_column_letter(j)}4:{get_column_letter(j)}{last})' if last>=4 else 0)
     p=total+3
     effective_pct = s['fee'] / (s['gross'] if s['fee'] and s['gross'] else s['amount'] if s['amount'] else 1)*100 if s['fee'] or s['gross'] or s['amount'] else 0
-    for row in [('SUMMARY',None),('Total Publish Rate*',s['gross']),('Total OTA Commission',s['ota']),('Total Payout / Reservation Amount',s['amount']),('Occupancy',occ['occupancy_pct']/100),('Occupied Room Nights',occ['occupied']),('Available Room Nights',occ['capacity']),('MANAGEMENT & OWNER SETTLEMENT',None),(f"Management Fee ({s['currency']}, {effective_pct:.2f}% effective)",s['fee']),('Additional Expenses',s['expenses']),('Estimated Owner Balance',s['owner_estimate']),('Report Status','APPROVED' if approved else 'DRAFT - NOT APPROVED')]:
+    for row in [('SUMMARY',None),('Allocated Gross Earnings*',s['gross']),('Allocated OTA Commission',s['ota']),('Allocated Stay Revenue (not bank payout)',s['amount']),('Occupancy',occ['occupancy_pct']/100),('Occupied Room Nights',occ['occupied']),('Available Room Nights',occ['capacity']),('MANAGEMENT & OWNER SETTLEMENT',None),(f"Management Fee ({s['currency']}, {effective_pct:.2f}% effective)",s['fee']),('Additional Expenses',s['expenses']),('Estimated Owner Balance',s['owner_estimate']),('Report Status','APPROVED' if approved else 'DRAFT - NOT APPROVED')]:
         ws.cell(p,2,row[0]);ws.cell(p,4,row[1]);p+=1
     ws.cell(p+1,2,'* Publish Rate uses Airbnb Gross earnings as available CSV proxy, not a separate published-rate field.')
-    ws.cell(p+2,2,'Revenue uses CHECK-IN month. Occupancy counts actual nights in selected month (even for prior check-ins).')
-    ws.cell(p+3,2,'Reservation Amount is not proof of bank settlement. Payout matching status is tracked separately.')
+    ws.cell(p+2,2,'Revenue, Gross, and OTA fee allocated by occupied stay nights in month; payout remains separate by payment date.')
+    ws.cell(p+3,2,'Original reservation amounts and full stay dates are shown in ALLOCATION DETAIL. Amount is not proof of bank receipt.')
     widths=[8,26,16,16,11,54,22,22,23,24]
     for j,w in enumerate(widths,1):ws.column_dimensions[get_column_letter(j)].width=w
     ws.freeze_panes='C4';ws.auto_filter.ref=f'A3:J{max(3,last)}'
@@ -123,6 +126,14 @@ def make_excel(villa,month,res,s,occ,expenses,payouts,approved):
             for c in ws[r][:4]:c.fill=PatternFill('solid',fgColor=BLUE);c.font=Font(color='FFFFFF',bold=True)
         elif ws.cell(r,2).value=='Occupancy':ws.cell(r,4).number_format='0.00%'
         elif isinstance(ws.cell(r,4).value,(int,float)):ws.cell(r,4).number_format='#,##0.00'
+    lifecycle=book.create_sheet('RESERVATION STATUS')
+    lifecycle.append(['Confirmation Code','Guest','Room / Listing','Source','Status','Current Amount'])
+    for _,r in res.iterrows():
+        lifecycle.append([excel_safe(r.get('Confirmation code','')),excel_safe(r.get('Guest','')),excel_safe(_room_listing_label(r)),r.get('_source','paid'),r.get('_status','Paid'),float(r.get('Amount') or 0)])
+    for cell in lifecycle[1]:
+        cell.fill=PatternFill('solid',fgColor=BLUE);cell.font=Font(color='FFFFFF',bold=True)
+    for i,w in enumerate([24,28,55,16,18,22],1):lifecycle.column_dimensions[get_column_letter(i)].width=w
+    for row in lifecycle.iter_rows(min_row=2,min_col=6,max_col=6): row[0].number_format='#,##0.00'
     details=book.create_sheet('AIRBNB PAYMENT REPORT')
     payment_headers=['Payout Date','Arriving By','Reference Code','Transfer Detail','Currency','Paid Out','Reservation Codes','Matching Status']
     details.append(payment_headers)
@@ -136,7 +147,25 @@ def make_excel(villa,month,res,s,occ,expenses,payouts,approved):
     for e in expenses:ex.append([excel_safe(e['category']),excel_safe(e['description']),e['currency'],e['amount']])
     for c in ex[1]:c.fill=PatternFill('solid',fgColor=BLUE);c.font=Font(bold=True,color='FFFFFF')
     for i,w in enumerate([24,55,15,22],1):ex.column_dimensions[get_column_letter(i)].width=w
-    guide=book.create_sheet('GUIDE');notes=[['GROUNDHAUS - REPORT NOTES'],['Basis revenue','Tanggal check-in dalam bulan laporan'],['Occupancy','Malam ditempati dalam bulan laporan / (units x hari kalender)'],['Room tracking','Nama kamar/unit mengikuti mapping listing Airbnb ke villa + room/unit'],['Publish rate proxy','Gross earnings dari CSV Airbnb; mungkin tidak sama dengan harga publish owner'],['Payout / Amount','Nominal kolom Amount baris Reservation; bukan bukti transfer bank'],['OTA Commission','Service fee yang tertulis pada baris Reservation'],['Fee basis','Konfigurasi individual villa, tercatat pada aplikasi'],['Currencies','Angka settlement hanya mata uang villa; currency lain dikecualikan'],['Approval','Perubahan data/config/expense membuat approval lama tidak berlaku'],['Payout matching','Belum cocok dengan bank statement; bukan kepastian dana diterima']]
+    alloc=book.create_sheet('ALLOCATION DETAIL')
+    alloc.append(['Confirmation Code','Guest','Room / Listing','Full Check In','Full Check Out','Full Booking Nights','Month Nights','Booking Amount','Monthly Stay Revenue','Booking Gross','Monthly Gross','Booking OTA Fee','Monthly OTA Fee','Rule'])
+    for _,r in res.sort_values('Start date').iterrows():
+        alloc.append([excel_safe(r.get('Confirmation code','')),excel_safe(r.get('Guest','')),excel_safe(_room_listing_label(r)),
+          r['Start date'].date() if pd.notna(r['Start date']) else None,
+          r['End date'].date() if pd.notna(r['End date']) else None,
+          float(r.get('Original Nights',r['Nights'])),float(r['Nights']),
+          float(r.get('Original Amount',r['Amount'])),float(r['Amount']),
+          float(r.get('Original Gross earnings',r['Gross earnings'])),float(r['Gross earnings']),
+          float(r.get('Original Service fee',r['Service fee'])),float(r['Service fee']),
+          excel_safe(r.get('Allocation Rule','stay-nights'))])
+    for c in alloc[1]:c.fill=PatternFill('solid',fgColor=BLUE);c.font=Font(color='FFFFFF',bold=True)
+    for j in range(1,15):alloc.column_dimensions[get_column_letter(j)].width=19 if j not in (2,3) else 35
+    for row in alloc.iter_rows(min_row=2):
+        for c in row:
+            if c.column in (4,5):c.number_format='dd mmm yyyy'
+            if c.column in (8,9,10,11,12,13):c.number_format='#,##0.00'
+    alloc.freeze_panes='D2'
+    guide=book.create_sheet('GUIDE');notes=[['GROUNDHAUS - REPORT NOTES'],['Basis revenue','Malam menginap aktual dalam bulan laporan (check-out tidak dihitung)'],['Occupancy','Malam ditempati dalam bulan laporan / (units x hari kalender)'],['Room tracking','Nama kamar/unit mengikuti mapping listing Airbnb ke villa + room/unit'],['Publish rate proxy','Porsi Gross earnings dari CSV Airbnb menurut malam; bukan harga publish independen'],['Stay Revenue','Porsi Amount untuk malam menginap di bulan laporan; bukan bukti transfer bank'],['OTA Commission','Porsi Service fee yang dialokasikan ke malam menginap dalam bulan'],['Fee basis','Konfigurasi individual villa, tercatat pada aplikasi'],['Currencies','Angka settlement hanya mata uang villa; currency lain dikecualikan'],['Approval','Perubahan data/config/expense membuat approval lama tidak berlaku'],['Payout matching','Belum cocok dengan bank statement; bukan kepastian dana diterima']]
     for row in notes:guide.append(row)
     guide.column_dimensions['A'].width=25;guide.column_dimensions['B'].width=96
     for c in guide[1]:c.fill=PatternFill('solid',fgColor=BLUE);c.font=Font(bold=True,color='FFFFFF')
@@ -156,9 +185,9 @@ def make_pdf(villa,month,res,s,occ,expenses,payouts,approved):
         return Paragraph(_pdf_text(txt), rtl_normal if _RTL_RANGE.search(txt) else normal)
 
     story=[Paragraph('GROUNDHAUS  |  MONTHLY OWNER REPORT',title),Paragraph(_pdf_text(villa),h2),Paragraph(f'Period: {escape(month)}  |  Status: {"APPROVED" if approved else "DRAFT — NOT APPROVED"}',normal),Spacer(1,7*mm)]
-    summaryrows=[['Metric','Value'],['Publish Rate*',money(s['gross'],s['currency'])],['OTA Commission',money(s['ota'],s['currency'])],['Reservation Amount',money(s['amount'],s['currency'])],['Occupancy',f"{occ['occupancy_pct']:.2f}% ({occ['occupied']}/{occ['capacity']} room nights)"],['Management Fee',money(s['fee'],s['currency'])],['Additional Expenses',money(s['expenses'],s['currency'])],['Estimated Owner Balance',money(s['owner_estimate'],s['currency'])]]
+    summaryrows=[['Metric','Value'],['Allocated Gross*',money(s['gross'],s['currency'])],['OTA Commission',money(s['ota'],s['currency'])],['Allocated Stay Revenue',money(s['amount'],s['currency'])],['Occupancy',f"{occ['occupancy_pct']:.2f}% ({occ['occupied']}/{occ['capacity']} room nights)"],['Management Fee (stay basis)',money(s['fee'],s['currency'])],['Additional Expenses',money(s['expenses'],s['currency'])],['Estimated Owner Balance',money(s['owner_estimate'],s['currency'])]]
     st=Table(summaryrows,colWidths=[82*mm,77*mm],hAlign='LEFT');st.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1C4E89')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F1F4F8')]),('PADDING',(0,0),(-1,-1),6)]));story +=[st,Spacer(1,8*mm),Paragraph('RESERVATION DETAILS',h3)]
-    headers=['Guest','Check in','Check out','Nights','Room / Listing','Gross*','OTA Fee','Amount']
+    headers=['Guest','Full check in','Full check out','Month nights','Room / Listing','Gross (mo)*','OTA (mo)','Stay revenue']
     data=[headers]
     for r in _rows(res):data.append([named_para(str(r[1])),str(r[2] or ''),str(r[3] or ''),str(int(r[4])),named_para(str(r[5])[:80]),money(r[6],s['currency']),money(r[7],s['currency']),money(r[8],s['currency'])])
     if len(data)==1:data.append(['No reservation','','','','','','',''])
@@ -167,7 +196,7 @@ def make_pdf(villa,month,res,s,occ,expenses,payouts,approved):
     if expenses:
         for e in expenses:story.append(named_para(str(e['description'])+' — '+money(e['amount'],e['currency'])))
     else:story.append(Paragraph('None recorded.',normal))
-    story +=[Spacer(1,5*mm),Paragraph('* Gross earnings is the available CSV proxy for publish rate. Revenue is based on check-in month; occupancy uses nights within the selected month. Reservation Amount is not proof of bank receipt. Payout matching requires verification.',normal)]
+    story +=[Spacer(1,5*mm),Paragraph('* Gross earnings is the available CSV proxy for publish rate. Revenue, Gross and OTA fee are allocated by stay nights within the selected month. Full stay dates remain unchanged. Reservation Amount is not proof of bank receipt. Payout matching requires verification.',normal)]
     doc.build(story);return b.getvalue()
 
 def zip_all(data):

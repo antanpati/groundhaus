@@ -3,6 +3,7 @@ import calendar
 from datetime import date, timedelta
 import pandas as pd
 from reporting import make_reservations
+from stay_allocation import allocate_month
 
 def month_limits(month):
     y,m = map(int,month.split('-'))
@@ -23,10 +24,21 @@ def _room_name(mapping_detail, listing):
 
 def reservation_month(df,mapping_detail,villa,month):
     start,end = month_limits(month)
-    return make_reservations(df,mapping_detail,'Check-in date',start,end,[villa])
+    # Filter property first, then allocate each stay across its actual months.
+    r=df[df['Type'].eq('Reservation')].copy() if not df.empty else df.copy()
+    if r.empty:
+        needed=['Type','Currency','Amount','Gross earnings','Service fee','Nights','Start date','End date','Listing','Guest','Confirmation code','Room']
+        return allocate_month(r.reindex(columns=list(dict.fromkeys(list(r.columns)+needed))),month)
+    r['Villa']=r['Listing'].map(lambda x:_villa_name(mapping_detail,x))
+    r['Room']=r['Listing'].map(lambda x:_room_name(mapping_detail,x))
+    return allocate_month(r[r['Villa'].eq(villa)].copy(),month)
 
 def occupancy(df,mapping_detail,villa,month,units):
     start,end = month_limits(month)
+    if df.empty or 'Type' not in df.columns:
+        start,end = month_limits(month)
+        capacity=units*((end-start).days+1)
+        return {'occupied':0,'capacity':capacity,'occupancy_pct':0.0,'over_capacity':False}
     r=df[df['Type'].eq('Reservation')].copy()
     r['Villa']=r['Listing'].map(lambda x:_villa_name(mapping_detail,x))
     r['Room']=r['Listing'].map(lambda x:_room_name(mapping_detail,x))
@@ -58,7 +70,7 @@ def summarize(res,expenses,settings):
     return dict(currency=curr,reservations=len(sub),nights=float(sub['Nights'].sum()) if len(sub) else 0,gross=gross,ota=ota,amount=amount,fee=fee,expenses=costs,owner_estimate=amount-fee-costs,foreign_currencies=sorted(set(res['Currency'].dropna())-{curr}) if len(res) else [])
 
 def reconciliation(df,existing_links):
-    if df.empty: return [],[]
+    if df.empty: return [],pd.DataFrame(columns=['Confirmation code','Listing','Currency','Amount','Type'])
     res=df[df['Type'].eq('Reservation')].copy()
     payouts=df[df['Type'].eq('Payout')].copy()
     manual={}

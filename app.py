@@ -1,15 +1,17 @@
-"""Groundhaus Airbnb Reporting V2.3 — local-only Streamlit app."""
+"""Groundhaus Airbnb Reporting V2.7 — local-only Streamlit app."""
 from datetime import date
 import os
 import hmac
 import pandas as pd
 import streamlit as st
 import store
+import reservation_master as rm
 from reporting import parse_csv,money
 from engine import reservation_month,occupancy,summarize,reconciliation
+from stay_allocation import available_months
 from owner_exports import make_excel,make_pdf,zip_all
 
-st.set_page_config(page_title='GROUNDHAUS | Villa Reporting V2.3',page_icon='🏡',layout='wide')
+st.set_page_config(page_title='GROUNDHAUS | Villa Reporting V2.7',page_icon='🏡',layout='wide')
 st.markdown('<style>h1,h2,h3 {color:#1c4e89} div[data-testid="stMetric"] {background:#f2f5fa;padding:13px;border-radius:9px}</style>',unsafe_allow_html=True)
 # Online deployments require an admin password; the local launcher binds only to localhost.
 local_mode = os.environ.get('APP_MODE') == 'local'
@@ -36,19 +38,27 @@ if not local_mode:
             st.rerun()
 
 st.title('GROUNDHAUS · Villa Reporting')
-st.caption('Local V2.3  |  Upload sekali · Mapping listing ke villa + room · Pilih villa · Review · Export owner report')
+st.caption('Groundhaus V2.7  |  Upload sekali · Mapping listing ke villa + room · Pilih villa · Review · Export owner report')
 
 with st.sidebar:
     st.header('1. Data Master')
-    uploaded=st.file_uploader('Airbnb Transaction History CSV',type=['csv'])
+    uploaded=st.file_uploader('Airbnb Paid Transaction CSV',type=['csv'])
     if uploaded and st.button('Import CSV ke histori',type='primary'):
         try:
             parsed=parse_csv(uploaded.getvalue())
-            added=store.import_transactions(parsed)
+            added=rm.import_paid(uploaded.getvalue(),uploaded.name,parsed)
             st.success(f'{added} transaksi baru disimpan; reupload identik tidak menggandakan data.')
         except Exception as e:
             st.error(f'Import gagal: {e}')
-    st.caption('Data tersimpan di app_data/groundhaus.sqlite3 pada laptop ini. Backup folder app_data secara berkala. Jangan upload CSV owner ke layanan publik.')
+    pending_upload=st.file_uploader('Airbnb Upcoming CSV (terpisah)',type=['csv'],key='upcoming_upload')
+    if pending_upload and st.button('Import Upcoming snapshot'):
+        try:
+            result=rm.import_upcoming(pending_upload.getvalue(),pending_upload.name,parse_csv(pending_upload.getvalue()))
+            st.success('Snapshot sama sudah tersimpan.' if result['repeated'] else f"{result['new_versions']} versi Upcoming baru dicatat.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f'Upcoming gagal diimpor: {exc}')
+    st.caption('Database persisten berada di app_data/groundhaus.sqlite3 pada VPS (Docker volume). Backup sebelum upgrade.')
 
 # Reset applies to ALL application data, not just the currently selected villa.
 with st.sidebar.expander('⚠️ Reset seluruh data', expanded=False):
@@ -73,16 +83,18 @@ with st.sidebar.expander('⚠️ Reset seluruh data', expanded=False):
                 st.success('Seluruh data aplikasi berhasil dihapus.')
                 st.rerun()
 
-raw=store.load_transactions()
-if raw.empty:
-    st.info('Mulai dengan upload CSV Airbnb di sidebar, lalu klik **Import CSV ke histori**. File contoh tersedia di sample_data.')
+rm.init()
+legacy=store.load_transactions()
+master=rm.get_state()
+raw=rm.actual_raw(legacy,master)
+res_all=rm.as_frame(list(master['selected'].values()))
+if res_all.empty:
+    st.info('Mulai dengan upload Paid CSV atau Upcoming CSV melalui sidebar. Data lama tetap dipertahankan.')
     st.stop()
 
-res_all=raw[raw['Type'].eq('Reservation')].copy()
-duplicates=res_all[res_all['Confirmation code'].ne('') & res_all.duplicated('Confirmation code',keep=False)]
-if not duplicates.empty:
-    st.error(f'{duplicates["Confirmation code"].nunique()} confirmation code memiliki lebih dari satu versi transaksi; periksa CSV sebelum finalisasi laporan. Import identik tidak menggandakan transaksi, tetapi transaksi yang berubah perlu direkonsiliasi manual.')
-if (raw['Currency'].nunique()>1):
+if master['conflicts']:
+    st.warning(f"{len({v['code'] for v in master['conflicts']})} confirmation code memerlukan review versi data. Tidak lagi dihitung dua kali.")
+if (not raw.empty and raw['Currency'].nunique()>1):
     st.info('Data memiliki lebih dari satu currency. Summary villa hanya menjumlahkan currency yang ditetapkan di pengaturan villa.')
 
 st.subheader('2. Listing → Property → Room Mapping')
@@ -120,6 +132,9 @@ existing = store.get_mapping_detail()
 mapping_detail = {name:existing.get(name, {'villa':name,'room':name}) for name in names}
 all_villas = sorted({(mapping_detail[name].get('villa') or name).strip() for name in names})
 
+# Keep current selections derived from exactly one effective reservation per confirmation code.
+
+
 property_overview = []
 for property_name in all_villas:
     listing_names = [name for name in names if (mapping_detail[name].get('villa') or name).strip() == property_name]
@@ -136,9 +151,9 @@ with left:
     st.caption(f'Room / Unit: {selected_rooms}')
     period_dates=res_all['Start date'].dropna()
     default_month=period_dates.max().strftime('%Y-%m') if not period_dates.empty else date.today().strftime('%Y-%m')
-    months=sorted(set(period_dates.dt.strftime('%Y-%m')).union({default_month,date.today().strftime('%Y-%m')}),reverse=True)
-    month=st.selectbox('Periode check-in (YYYY-MM)',months)
-    st.caption('Periode revenue = bulan check-in. Occupancy tetap dihitung berdasarkan malam yang benar-benar menginap di bulan ini.')
+    months=sorted(set(available_months(res_all)).union({default_month,date.today().strftime('%Y-%m')}),reverse=True)
+    month=st.selectbox('Periode menginap (YYYY-MM)',months)
+    st.caption('Stay-Based Revenue: Amount, Gross, dan OTA fee dialokasikan ke bulan sesuai jumlah malam. Payout bank tetap berdasarkan tanggal transfer Airbnb.')
 with right:
     st.subheader('Settings Villa')
     setting=store.get_settings(villa)
@@ -156,6 +171,65 @@ with right:
             st.success('Setting tersimpan')
             st.rerun()
 
+st.subheader('4. Reservation Lifecycle — Review & Adjustment')
+pending_codes,pending_adjustments=rm.unresolved_for_villa(master,mapping_detail,villa,month)
+with st.expander(f'Review change queue ({len(pending_codes)} conflicts · {len(pending_adjustments)} adjustment)',expanded=bool(pending_codes or pending_adjustments)):
+    for code in sorted(pending_codes):
+        vers=master['versions'][code]
+        st.markdown(f'**{code}** — conflicting Paid/Upcoming versions; pilih versi yang benar setelah cocokkan Airbnb')
+        summary=[]
+        for v in vers:
+            r=__import__('json').loads(v['payload'])
+            summary.append({'Version':v['id'],'Source':v['source'],'Check In':r.get('Start date'),'Check Out':r.get('End date'),'Nights':r.get('Nights'),'Amount':money(r.get('Amount',0),r.get('Currency','IDR')),'OTA Fee':money(r.get('Service fee',0),r.get('Currency','IDR'))})
+        st.dataframe(pd.DataFrame(summary),hide_index=True,use_container_width=True)
+        options=[v['id'] for v in vers if v['source']=='paid'] if any(v['source']=='paid' for v in vers) else [v['id'] for v in vers]
+        labels={v['id']:f"#{v['id']} · {v['source'].upper()} · {str(pd.to_datetime(__import__('json').loads(v['payload']).get('Start date')).date())} · {money(__import__('json').loads(v['payload']).get('Amount',0),__import__('json').loads(v['payload']).get('Currency','IDR'))}" for v in vers}
+        vchoice=st.selectbox('Versi untuk '+code,options,format_func=lambda v:labels[v],key='version_'+code)
+        note=st.text_input('Alasan pilih versi '+code,key='why_'+code)
+        if st.button('Konfirmasi versi',key='pick_'+code):
+            try:
+                rm.choose(code,vchoice,note or 'Verified against Airbnb source')
+                st.rerun()
+            except Exception as exc: st.error(str(exc))
+    if pending_adjustments:
+        st.warning('Adjustment pada CSV Paid perlu keputusan manual: sudah masuk Amount, perlu dikurangkan/ditambah, atau tidak masuk laporan. Jangan hitung ganda.')
+    for a in pending_adjustments:
+        st.write(f"{a.get('Confirmation code')} · {money(a.get('Amount',0),a.get('Currency','IDR'))}")
+        mode=st.selectbox('Perlakuan adjustment', ['included','applied','excluded'],format_func=lambda x:{'included':'Sudah tercermin dalam Amount','applied':'Terapkan sebagai selisih ke Amount','excluded':'Tidak berlaku untuk report'}[x],key='adjmode'+a['_key'])
+        why=st.text_input('Alasan / bukti adjustment',key='adjwhy'+a['_key'])
+        if st.button('Simpan keputusan adjustment',key='adjbtn'+a['_key']):
+            try:rm.set_adjustment(a['_key'],mode,why);st.rerun()
+            except Exception as exc:st.error(str(exc))
+
+records_for_villa=[r for r in master['selected'].values() if (mapping_detail.get(r.get('Listing',''),{}).get('villa') or r.get('Listing'))==villa]
+if records_for_villa:
+    with st.expander('Edit / Cancel reservasi (manual, tersimpan di audit trail)'):
+        codes=sorted({r['_code'] for r in records_for_villa})
+        selected_code=st.selectbox('Confirmation Code',codes)
+        original=master['selected'][selected_code]
+        current_status=original.get('_status','Upcoming')
+        st.caption(f"Source: {original.get('_source','unknown').upper()} · Status: {current_status} · Room listing: {original.get('Listing','')}")
+        with st.form('override_reservation'):
+            status=st.selectbox('Status manual',['Modified','Cancelled','Confirmed'],index=1 if current_status=='Cancelled' else 0)
+            a,b=st.columns(2)
+            begin=a.date_input('Check-in final',value=pd.to_datetime(original['Start date']).date())
+            finish=b.date_input('Check-out final',value=pd.to_datetime(original['End date']).date())
+            c,d,e=st.columns(3)
+            amount=c.number_input('Amount final',value=float(original.get('Amount') or 0))
+            fee=d.number_input('OTA fee final',value=float(original.get('Service fee') or 0))
+            gross=e.number_input('Gross final',value=float(original.get('Gross earnings') or 0))
+            note=st.text_input('Alasan (wajib)')
+            if st.form_submit_button('Simpan adjustment manual'):
+                try:rm.save_override(selected_code,status,begin,finish,amount,fee,gross,note);st.rerun()
+                except Exception as exc:st.error(str(exc))
+        if selected_code in master['overrides']:
+            why=st.text_input('Alasan mengembalikan ke data sumber',key='undo_reason')
+            if st.button('Hapus adjustment manual (audit tetap tersimpan)'):
+                try:rm.remove_override(selected_code,why);st.rerun()
+                except Exception as exc:st.error(str(exc))
+        audit=rm.event_history(selected_code)
+        if audit:st.dataframe(pd.DataFrame(audit),hide_index=True,use_container_width=True)
+
 res=reservation_month(raw,mapping_detail,villa,month)
 settings=store.get_settings(villa)
 expenses=store.get_expenses(villa,month)
@@ -168,30 +242,43 @@ if occ['over_capacity']:
     st.error('Room nights melebihi kapasitas. Periksa jumlah unit, mapping room/unit, atau transaksi duplikat.')
 
 st.divider()
-st.subheader(f'4. Dashboard · {villa} / {month}')
+st.subheader(f'5. Stay-Based Dashboard · {villa} / {month}')
+future_raw=rm.as_frame(master['upcoming'])
+future_res=reservation_month(future_raw,mapping_detail,villa,month) if not future_raw.empty else pd.DataFrame()
+# Expected must exclude any reservations already represented as Paid, even if prior paid month differs.
+future_amount=float(future_res.loc[future_res['Currency'].eq(settings['currency']),'Amount'].sum()) if not future_res.empty else 0
+f1,f2,f3=st.columns(3)
+f1.metric('Upcoming Stay Revenue (forecast)',money(future_amount,settings['currency']))
+f2.metric('Upcoming Bookings with Nights in Month',str(len(future_res)))
+forecast_nights=occupancy(future_raw,mapping_detail,villa,month,settings['units'])['occupied'] if not future_raw.empty else 0
+f3.metric('Upcoming Room Nights',str(forecast_nights))
+if not future_res.empty:
+    st.dataframe(future_res[['Confirmation code','Listing','Start date','End date','Nights','Amount']].style.format({'Amount':lambda x:money(x,settings['currency'])}),hide_index=True,use_container_width=True)
+st.caption('Upcoming memakai alokasi malam bulan ini, tidak digabung dengan Actual Paid. Booking yang hilang dari Upcoming belum tentu cancelled.')
+
 c1,c2,c3,c4=st.columns(4)
-c1.metric('Reservation Amount',money(s['amount'],s['currency']))
-c2.metric('Reservation count',str(s['reservations']))
+c1.metric('Actual Stay Revenue',money(s['amount'],s['currency']))
+c2.metric('Bookings touching month',str(s['reservations']))
 c3.metric('Occupancy',f"{occ['occupancy_pct']:.2f}%")
-c4.metric('Owner balance (estimasi)',money(s['owner_estimate'],s['currency']))
+c4.metric('Owner balance (stay basis, estimasi)',money(s['owner_estimate'],s['currency']))
 c1,c2,c3,c4=st.columns(4)
 c1.metric('Gross earnings*',money(s['gross'],s['currency']))
 c2.metric('OTA commission',money(s['ota'],s['currency']))
 c3.metric('Management fee',money(s['fee'],s['currency']))
 c4.metric('Room nights',f"{occ['occupied']} / {occ['capacity']}")
-st.caption('*Gross earnings adalah proxy Publish Rate dari CSV, bukan field publish-rate independen. Amount pada Reservation bukan bukti transfer dana dari Airbnb.')
+st.caption('Amount, Gross, dan OTA fee adalah porsi bulan menginap. Check-in/out tetap menunjukkan seluruh periode booking. Nilai Amount bukan bukti payout bank; biaya tambahan mengikuti bulan input.')
 if len(res):
-    detail=(res[['Guest','Start date','End date','Room','Listing','Confirmation code','Currency','Nights','Gross earnings','Service fee','Amount']]
+    detail=(res[['Guest','Start date','End date','Room','Listing','Confirmation code','Currency','Original Nights','Nights','Original Amount','Amount','Gross earnings','Service fee']]
               .sort_values(['Start date','Room','Listing'])
-              .rename(columns={'Guest':'Guest Name','Start date':'Check In','End date':'Check Out','Room':'Room / Unit','Listing':'Airbnb Listing','Confirmation code':'Confirmation Code','Nights':'Nights','Gross earnings':'Gross Earnings','Service fee':'OTA Commission','Amount':'Reservation Amount'}))
-    money_cols=['Gross Earnings','OTA Commission','Reservation Amount']
+              .rename(columns={'Guest':'Guest Name','Start date':'Check In','End date':'Check Out','Room':'Room / Unit','Listing':'Airbnb Listing','Confirmation code':'Confirmation Code','Original Nights':'Booking Nights','Nights':'Month Nights','Original Amount':'Booking Amount','Gross earnings':'Monthly Gross','Service fee':'Monthly OTA Commission','Amount':'Monthly Stay Revenue'}))
+    money_cols=['Booking Amount','Monthly Gross','Monthly OTA Commission','Monthly Stay Revenue']
     style_fmt={col:(lambda x, cur=settings['currency']: money(x,cur) if pd.notna(x) else '—') for col in money_cols}
-    style_fmt.update({'Check In':lambda x:'' if pd.isna(x) else x.strftime('%Y-%m-%d'),'Check Out':lambda x:'' if pd.isna(x) else x.strftime('%Y-%m-%d'),'Nights':'{:,.0f}'})
+    style_fmt.update({'Check In':lambda x:'' if pd.isna(x) else x.strftime('%Y-%m-%d'),'Check Out':lambda x:'' if pd.isna(x) else x.strftime('%Y-%m-%d'),'Month Nights':'{:,.0f}','Booking Nights':'{:,.0f}'})
     st.dataframe(detail.style.format(style_fmt),use_container_width=True,hide_index=True)
 else:
     st.info('Tidak ada reservasi dengan tanggal check-in pada bulan ini.')
 
-st.subheader('5. Additional Expenses')
+st.subheader('6. Additional Expenses')
 st.caption('Input manual untuk bulan dan villa terpilih. Nilai positif mengurangi estimasi saldo owner; nilai negatif dapat dipakai untuk adjustment/kredit.')
 with st.form('new_expense'):
     a,b,c,d=st.columns([1,2,1,1])
@@ -212,7 +299,7 @@ for e in expenses:
         store.remove_expense(e['id'],villa)
         st.rerun()
 
-st.subheader('6. Airbnb Payout Reconciliation')
+st.subheader('7. Airbnb Payout Reconciliation')
 st.caption('Auto-suggestion hanya untuk satu reservasi dengan nominal dan currency yang cocok secara unik. Transfer gabungan harus dipilih manual. Pencocokan payout TIDAK membuktikan dana sudah masuk rekening.')
 links=store.get_links();rows,all_res=reconciliation(raw,links)
 code_to_villa={str(r['Confirmation code']):(mapping_detail.get(r['Listing'],{}).get('villa') or r['Listing']) for _,r in all_res.iterrows()}
@@ -251,15 +338,17 @@ with st.expander(f'Payout matching ({len(related)} candidate/matched)',expanded=
                 st.rerun()
     st.caption('Payout tanpa kemungkinan pencocokan unik bisa diperiksa dari seluruh transaksi sumber; tidak dimasukkan ke total owner tanpa validasi.')
 
-st.subheader('7. Review, Approve & Export')
-snapshot={'villa':villa,'month':month,'settings':settings,'reservations':res[['Confirmation code','Currency','Amount','Gross earnings','Service fee','Nights','Room','Listing']].fillna('').astype(str).to_dict('records'),'occupancy':occ,'expenses':expenses,'links':sorted([(ref,code) for ref,code in links if code_to_villa.get(code)==villa])}
+st.subheader('8. Review, Approve & Export')
+snapshot={'v27_master_state':[(r['_code'],r.get('_status'),r.get('_source'),r.get('Amount'),r.get('Start date'),r.get('End date')) for r in records_for_villa], 'adjustment_decisions':[(a['_key'],a['_decision']) for a in master['adjustments'] if a.get('Confirmation code') in [r['_code'] for r in records_for_villa]], 'unresolved_codes':sorted(pending_codes), 'villa':villa,'month':month,'settings':settings,'reservations':res[['Confirmation code','Currency','Amount','Gross earnings','Service fee','Nights','Room','Listing']].fillna('').astype(str).to_dict('records'),'occupancy':occ,'expenses':expenses,'links':sorted([(ref,code) for ref,code in links if code_to_villa.get(code)==villa])}
 fp=store.fingerprint(snapshot)
 approved=store.approval_state(villa,month,fp)
-if approved:
+if approved and not (pending_codes or pending_adjustments):
     st.success('APPROVED · report matches the most recently approved data.')
 else:
     st.warning('DRAFT · report requires review. Data changes invalidate previous approval.')
-if st.button('Approve current report',disabled=bool(duplicates.size) or bool(occ['over_capacity']) or bool(len(foreign))):
+if pending_codes or pending_adjustments:
+    st.error('Ada perubahan reservasi / adjustment yang belum direview untuk villa dan periode ini. Approval dinonaktifkan.')
+if st.button('Approve current report',disabled=bool(pending_codes or pending_adjustments) or bool(occ['over_capacity']) or bool(len(foreign))):
     store.set_approval(villa,month,fp,True)
     st.rerun()
 if st.button('Revoke approval'):
@@ -289,8 +378,10 @@ with st.expander('Export semua villa dalam satu ZIP (bulan sama)'):
         for v in all_villas:
             vs=store.get_settings(v);vr=reservation_month(raw,mapping_detail,v,month);ve=store.get_expenses(v,month)
             ss=summarize(vr,ve,vs);oo=occupancy(raw,mapping_detail,v,month,vs['units'])
-            vfp=store.fingerprint({'villa':v,'month':month,'settings':vs,'reservations':vr[['Confirmation code','Currency','Amount','Gross earnings','Service fee','Nights','Room','Listing']].fillna('').astype(str).to_dict('records'),'occupancy':oo,'expenses':ve,'links':sorted([(ref,code) for ref,code in links if code_to_villa.get(code)==v])})
-            va=store.approval_state(v,month,vfp)
+            vrecords=[r for r in master['selected'].values() if (mapping_detail.get(r.get('Listing',''),{}).get('villa') or r.get('Listing'))==v]
+            vpending, vadj=rm.unresolved_for_villa(master,mapping_detail,v,month)
+            vfp=store.fingerprint({'v27_master_state':[(r['_code'],r.get('_status'),r.get('_source'),r.get('Amount'),r.get('Start date'),r.get('End date')) for r in vrecords], 'adjustment_decisions':[(a['_key'],a['_decision']) for a in master['adjustments'] if a.get('Confirmation code') in [r['_code'] for r in vrecords]], 'unresolved_codes':sorted(vpending), 'villa':v,'month':month,'settings':vs,'reservations':vr[['Confirmation code','Currency','Amount','Gross earnings','Service fee','Nights','Room','Listing']].fillna('').astype(str).to_dict('records'),'occupancy':oo,'expenses':ve,'links':sorted([(ref,code) for ref,code in links if code_to_villa.get(code)==v])})
+            va=store.approval_state(v,month,vfp) and not bool(vpending or vadj)
             vp=[p for p in rows if p['codes'] and all(code_to_villa.get(code)==v for code in p['codes'])]
             subset_v=vr[vr['Currency'].eq(vs['currency'])]
             try:
@@ -304,22 +395,22 @@ with st.expander('Export semua villa dalam satu ZIP (bulan sama)'):
     if 'all_zip' in st.session_state:
         st.download_button('Download ZIP',st.session_state['all_zip'],file_name=f'GROUNDHAUS_OWNERS_{month}.zip',mime='application/zip')
 
-st.subheader('8. Histori Revenue')
-st.caption('Perbandingan hanya bulan check-in dengan transaksi yang sudah diimport. Bulan yang tidak ada reservasi bukan berarti properti selalu kosong.')
-months_all=sorted(set(res_all['Start date'].dropna().dt.strftime('%Y-%m')))
+st.subheader('9. Histori Revenue')
+st.caption('Revenue dihitung dari malam menginap yang jatuh dalam bulan tersebut. Bulan tanpa data impor bukan bukti properti kosong.')
+months_all=available_months(rm.as_frame(master['actual']))
 history=[]
 for mo in months_all:
     rr=reservation_month(raw,mapping_detail,villa,mo)
     sm=summarize(rr,store.get_expenses(villa,mo),settings)
-    history.append({'Month':mo,'Reservation Amount':sm['amount'],'Reservation Count':sm['reservations'],'Management Fee':sm['fee']})
+    history.append({'Month':mo,'Stay Revenue':sm['amount'],'Reservation Count':sm['reservations'],'Management Fee':sm['fee']})
 if history:
     hist=pd.DataFrame(history).set_index('Month')
-    st.line_chart(hist['Reservation Amount'])
+    st.line_chart(hist['Stay Revenue'])
     hist_display = hist.reset_index()
     hist_style = hist_display.style.format({
-        'Reservation Amount': lambda x, cur=settings['currency']: money(x,cur),
+        'Stay Revenue': lambda x, cur=settings['currency']: money(x,cur),
         'Reservation Count': '{:,.0f}',
         'Management Fee': lambda x, cur=settings['currency']: money(x,cur),
     })
     st.dataframe(hist_style,use_container_width=True,hide_index=True)
-st.caption('V2.3 lokal. Backup file app_data/groundhaus.sqlite3. Hindari pengiriman database ini ke pihak lain karena berisi data tamu.')
+st.caption('V2.7. Backup file app_data/groundhaus.sqlite3. Hindari pengiriman database ini ke pihak lain karena berisi data tamu.')
